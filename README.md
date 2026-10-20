@@ -1,20 +1,20 @@
 # wondercv-cli
 
-让 AI 通过命令行帮你维护[超级简历 WonderCV](https://www.wondercv.com/)里的简历。
+[超级简历 WonderCV](https://www.wondercv.com/) 的非官方命令行客户端，附带一个自包含的 Agent Skill。
 
-提供 Python 命令行客户端和一个自带脚本的 Agent Skill。支持微信小程序扫码登录、内容编辑、模块排序、标题与主题调整、图片上传，以及 PDF/PNG 导出。核心操作仅使用标准库；登录展示官网原始小程序码，不重新编码成普通二维码。
+可以让 AI 助手直接操作网站里的简历，也可以自己运行脚本。支持内容编辑、模块排序、标题与主题调整、图片上传和 PDF/PNG 导出，登录使用微信小程序扫码。
 
 ## 为什么做这个
 
-从上学到现在工作，超级简历一直是我非常喜欢用的简历制作工具。为了支持它，我还充了永久会员。
+从上学到现在工作，超级简历一直是我很喜欢用的简历工具。为了支持它，我还充了永久会员。
 
-但手动编写、反复修改简历实在太麻烦，所以我直接让 **Claude Opus 5.5** 写了一个 CLI 版本，让 AI 能通过命令行帮我维护简历、调整排版，再导出文件。
+但手动编写、反复修改简历实在太麻烦，所以我直接让 Claude 写了这个 CLI。现在可以把修改交给 AI，继续用超级简历保存和导出。
 
-这个项目是非官方客户端，仍然使用超级简历提供的服务。如果你也喜欢这个工具，欢迎去[官网](https://www.wondercv.com/)体验和支持。需要会员的功能，也请支持官方会员。
+如果你也喜欢超级简历，欢迎去[官网](https://www.wondercv.com/)支持官方会员。这个项目只是换了一种操作方式，仍然使用它的服务，会员功能也照常需要会员。
 
 ## 安装 Skill
 
-需要 Python 3。以下安装命令使用 [Skills CLI](https://github.com/vercel-labs/skills)，当前要求 Node.js 22.20 或更高版本。
+脚本需要 Python 3；安装 Skill 使用 [Skills CLI](https://github.com/vercel-labs/skills)，当前要求 Node.js 22.20+。
 
 安装到当前项目的 Claude Code：
 
@@ -22,25 +22,25 @@
 npx skills add nEvErMoReaken/wondercv-cli --skill wondercv -a claude-code -y
 ```
 
-让安装器选择其他受支持的助手：
+使用其他助手时，交给安装器选择：
 
 ```bash
 npx skills add nEvErMoReaken/wondercv-cli --skill wondercv
 ```
 
-如需跨项目使用，加上 `-g`。Skill 目录内已携带 Python 脚本，不需要再克隆仓库。首次使用时让助手发起扫码登录：支持图片的终端显示官方小程序码原图，否则输出本地文件链接，再调用等待钩子。扫码和手机确认由本人完成，安装 Skill 本身不会获得账号权限。
+全局安装加 `-g`。Skill 自带脚本，不必另行克隆仓库；首次使用时由助手发起扫码登录，在手机上确认授权即可。
 
-安装后可以对助手说：
+比如：
 
 > 先读取我的超级简历，给我修改建议，等我确认后再复制一份修改。保留真实经历，突出后端开发能力，最后导出 PDF 给我检查。
 
-Skill 会先确认目标和改动范围，再执行保存、重新读取和导出。它不内置 AI 模型，也不会替你购买会员。
+Skill 约定了先确认改动、保存后重读核对的流程，详见 [`SKILL.md`](skills/wondercv/SKILL.md)。模型由你使用的助手提供，CLI 本身不接模型。
 
-技能格式与流程见 [`skills/wondercv/SKILL.md`](skills/wondercv/SKILL.md)。技能的目录展示由 [skills.sh](https://skills.sh/) 根据安装数据处理，不能保证安装后立即出现在榜单上。
+[在 skills.sh 查看](https://skills.sh/nevermoreaken/wondercv-cli/wondercv)。
 
 ## 直接运行脚本
 
-不使用 Skill 也可以：
+只用 CLI 的话：
 
 ```bash
 git clone https://github.com/nEvErMoReaken/wondercv-cli.git
@@ -48,47 +48,48 @@ cd wondercv-cli
 python3 wondercv.py --help
 ```
 
-目前以 Python 脚本提供，不会安装系统级 `wondercv` 命令。根目录脚本是兼容入口，实际实现只有一份，位于 `skills/wondercv/scripts/wondercv.py`。
+核心操作只用 Python 标准库，无需 pip 安装，也不提供系统级 `wondercv` 命令。根目录脚本是兼容入口，实现位于 `skills/wondercv/scripts/wondercv.py`。
 
 ### 微信扫码登录
 
-运行后自动选择展示方式，并等待用户用微信扫码、在手机上确认：
+运行后用微信扫码，在手机上确认：
 
 ```bash
 python3 wondercv.py auth login
 ```
 
-- 检测到 iTerm2 / WezTerm 的图片能力时，直接显示原图；Kitty / Ghostty / Warp 使用原生 Kitty 图片协议。检测依据为终端环境标识及 stderr 是否连接终端，不读取用户按键进行探测。
-- Kitty 协议只能接收 PNG / 像素数据；官方返回 JPEG 时，仅在环境已有 Pillow 的情况下转换显示，保存的官方原图字节不变。没有解码能力时回退到链接，不自动安装依赖。
-- 不支持、无法确认支持、tmux / screen 或输出被重定向时，输出 `file:///…` 文件链接，不输出字符画、不启动网页服务、不上传图床。
-- 文件链接只指向运行脚本的电脑。SSH 上的链接指向远端文件，需要先下载到本机，再打开扫码；CLI 不会把远端路径说成本机可访问的链接。
+使用的是官网原始小程序码，不走公众号二维码，也不重新编码。CLI 根据终端环境标识和 stderr 的 TTY 状态选择展示方式：
 
-约 60 秒内扫码并确认后，CLI 会按官网要求登记 `WonderCV CLI` 常用设备、验证新凭证可用，再原子保存到 `~/.config/wondercv/token`（文件 600、目录 700）。二维码过期、取消、设备登记或验证失败都不会覆盖旧凭证；已经有凭证时，要明确使用 `auth login --replace` 才能替换。
+- iTerm2 / WezTerm 直接显示图片；Kitty / Ghostty / Warp 使用 Kitty 图片协议。官方返回 JPEG 时，后者需要环境已有 Pillow 才能转换显示，磁盘上的原图不变；缺少时回退到链接，不自动安装。
+- 未知终端、tmux / screen 或输出被重定向时，给出 `file:///…` 文件链接。没有字符画、临时网页或图床。
+- SSH 场景的文件链接指向远端，需先下载到本机再打开。
 
-给 AI 助手的两阶段方式：
+码约 60 秒有效。确认后会按官网要求登记 `WonderCV CLI` 常用设备，验证凭证，再原子保存到 `~/.config/wondercv/token`（文件 600、目录 700）。过期、取消、设备登记或验证失败都会保留旧凭证；替换已有凭证需加 `--replace`。
+
+助手可以分两步拿图、等待：
 
 ```bash
-# 立即返回 qr_path 和 qr_uri，助手按宿主图片能力展示原图或文件链接
+# 返回 qr_path 和 qr_uri，先展示原图或文件链接
 python3 wondercv.py --json auth login --start --image-only
 
-# 展示后调用等待钩子，用户不必再手打“扫好了”
+# 展示后立即等待扫码结果
 python3 wondercv.py --json auth wait --timeout 60
 
 python3 wondercv.py auth status
 python3 wondercv.py auth cancel
 ```
 
-`status=waiting` 不代表登录成功；只有 `status=authenticated` 才表示设备登记、只读校验和凭证保存均完成。图片/链接要放在用户能看到的回复里，工具读取成功不代表用户终端显示成功。过期后需重新生成新码。常用设备名额满、需绑定手机或完善新账号时，去官网处理，CLI 不自动删除设备、不绕过验证码。取消只清理本机待扫码材料，不注销已有登录。
+`waiting` 表示仍在等待，`authenticated` 才表示设备登记、校验和保存均已完成。过期后重新生成；`auth cancel` 只清理待扫码材料，不注销已有登录。设备名额满、需要绑定手机或完善账号时，需到官网处理，CLI 不会删除其他设备或绕过验证码。
 
-### 已有凭证（兼容）
+### 使用已有凭证
 
-仍支持环境变量 `WONDERCV_TOKEN`，或手动把官网登录 Cookie `_t` 保存到 `~/.config/wondercv/token`。**环境变量优先于文件**；扫码后若提示 `environment_override=true`，应取消或更新旧环境变量，避免后续仍使用旧账号。
+也可以使用官网登录 Cookie `_t`：设置 `WONDERCV_TOKEN`，或保存到 `~/.config/wondercv/token`。环境变量优先；扫码结果若含 `environment_override=true`，记得取消或更新旧变量，否则后续仍使用旧凭证。
 
-登录凭证具有账号访问权限；二维码与待扫码会话也是短期敏感材料。不要把它们发到公开对话、图床、Issue 或日志中，也不要提交到 Git。凭证失效时可重新扫码登录。
+凭证、二维码和待扫码会话都按敏感信息处理，不放进 Git、公开日志、Issue 或图床。凭证失效后重新扫码即可。
 
 ## 常用操作
 
-下面的 `CV_TOKEN` 是查询结果里的简历标识，不是登录凭证。将示例值替换为你确认要操作的简历。
+先用 `resume list` 找到目标简历。下文的 `CV_TOKEN` 是简历标识，与登录凭证不同。
 
 ```bash
 CV_TOKEN='替换为目标简历 token'
@@ -127,26 +128,26 @@ python3 wondercv.py resume export "$CV_TOKEN" --format pdf --out ./resume.pdf
 python3 wondercv.py resume export "$CV_TOKEN" --format png --out ./resume.png
 ```
 
-其他命令包括 `edu`、`org`、`section`、`item`、`opus`、`share`、`template` 和各类排序。通过对应命令的 `--help` 查看参数。全局 `--json` 必须放在命令组之前。
+教育经历、组织经历、自定义模块、作品、分享和模板分别见 `edu`、`org`、`section/item`、`opus`、`share`、`template`。各子命令支持 `--help`；需要结构化输出时，将全局 `--json` 放在命令组前。
 
 ## 安全与恢复
 
-- 先读取和确认再写入；优先在副本上编辑，内容事实仍由本人确认。
-- 网站复制的部分自定义模块仍与原件共享。CLI 会阻止已识别的不安全修改，复制并不保证所有对象天然隔离。
-- 回收站里的引用无法完整读取时，涉及共享对象的部分改名、删除及孤立对象清理会保守拒绝，没有强制绕过选项。
-- 创建请求结果未知时不自动重发，以免生成重复内容。未决操作保存在受限权限的本地状态目录，可通过 `python3 wondercv.py recover` 查看候选，再显式决定如何处理。
-- 修改作品标题、链接时保留原二维码；清除附件需要明确传入移除参数。
-- 导出先写临时文件再原子发布；未加 `--force` 不会覆盖已有文件。
-- HTTPS 证书校验保持开启，认证 API 不自动跟随重定向。企业网络可使用可信的 `WONDERCV_CA_FILE`，不要关闭校验。
-- 未决操作目录默认在 `~/.config/wondercv/state/`，可通过 `WONDERCV_STATE_DIR` 修改；不要上传该目录、凭证或导出的私人简历。
+建议先读完整内容，在副本上修改，最后核对导出文件。涉及经历和数字，仍需本人确认。另有几处需要留意：
+
+- 网站复制的部分自定义模块会与原件共享，副本并非完全隔离。CLI 会拦截已识别的不安全修改；回收站引用无法完整读取时，相关改名、删除和孤立对象清理也会拒绝，没有 force 绕过。
+- 创建请求结果未知时不自动重发。用 `python3 wondercv.py recover` 查看未决操作和候选，再决定如何处理，避免重复创建。
+- 修改作品标题、链接会保留原二维码；移除附件需明确传参。导出先写临时文件再原子发布，默认不覆盖，覆盖需加 `--force`。
+- HTTPS 证书校验始终开启，认证 API 不跟随重定向。企业网络可通过 `WONDERCV_CA_FILE` 加载可信 CA。
+
+未决操作保存在 `~/.config/wondercv/state/`，可用 `WONDERCV_STATE_DIR` 改位置。这个目录和导出的私人简历都不应公开。
 
 退出码：`0` 成功，`1` 接口业务或内部错误，`2` 命令用法错误，`3` 输入/配置或安全拒绝，`4` 网络/服务端故障。错误写入 stderr，并区分部分完成与结果未知。
 
 ## 验证与限制
 
-已在 Python 3.12 环境运行自动化测试，并在真实账号的测试简历上验证头像、自定义校徽、作品图片上传，PDF/PNG 下载，及代表性主题和导出效果。导出文件已实际打开检查，不只是检查接口返回成功。
+当前离线回归共 180 项，已在 Python 3.8 和 3.12 下通过。真实账号验证只操作测试简历，覆盖头像、自定义校徽、作品图片上传、PDF/PNG 下载及代表性主题；导出文件也已打开检查。
 
-运行不访问真实账号的测试：
+离线测试：
 
 ```bash
 python3 -m unittest \
@@ -154,20 +155,26 @@ python3 -m unittest \
   tests.test_upload tests.test_headmodule tests.test_distribution tests.test_login -v
 ```
 
-登录与图片展示测试使用合成响应，覆盖原图字节、终端能力检测、链接回退、JSON 输出隔离及凭证保护，不会访问真实账号。
+登录与终端图片测试使用合成响应，覆盖原图字节、能力检测、链接回退、JSON 输出隔离和凭证保护。
 
-真实账号测试是显式开启的：`WONDERCV_LIVE=1 python3 -m unittest tests.test_live -v`。它会创建或复用测试夹具并执行写入，**不是只读检查**。运行前确认账号、夹具及清理安排；频控或外部条件造成的跳过不计为通过。
+真实账号测试需显式开启：
 
-已知边界：
+```bash
+WONDERCV_LIVE=1 python3 -m unittest tests.test_live -v
+```
 
-- 微信小程序码生成已真实验证；用户扫码确认至凭证保存的完整链路仍待真实验收，自动化模拟不等于真实登录通过。
-- 使用网站接口，兼容性可能随官网更新变化。
-- 会员权益、回收站容量和删除频控由平台决定，CLI 不绕过限制。
-- 分享设置可读写，但第二访客的访问控制与撤销效果仍待完整验证。
-- 仅核对过代表性主题的视觉效果，不代表所有排版组合均已逐一检查。
+它会创建或复用测试夹具并写入账号数据，运行前需确认账号和清理安排。因频控或外部条件跳过的项目不算通过。
+
+仍未验证完整的部分：
+
+- 小程序码生成已实测，扫码确认到凭证保存的完整链路还没有完成真实验收。
+- 分享设置可读写，但第二访客的访问控制、撤销效果仍待验证。
+- 只检查过代表性主题，未逐一检查所有排版组合。
+
+接口兼容性可能随官网更新变化；会员权益、回收站容量和删除频控均以平台为准。
 
 ## 许可与声明
 
-项目代码采用 [MIT License](LICENSE)。自包含 Skill 也携带许可证。
+代码采用 [MIT License](LICENSE)，Skill 内附同一份许可证。
 
-本项目是非官方客户端，与 WonderCV 官方无隶属关系。超级简历的名称、网站和服务属于其各自权利人；本项目的 MIT 许可不授予对官方服务的额外权限。请仅操作本人或已获授权的账号和简历，遵守平台条款。
+本项目与 WonderCV 官方无隶属关系。超级简历的名称、网站和服务属于其各自权利人，MIT 许可不包含官方服务的额外权限。仅用于本人或已获授权的账号和简历，遵守平台条款。
