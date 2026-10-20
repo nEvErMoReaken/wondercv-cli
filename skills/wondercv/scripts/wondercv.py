@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""超级简历 WonderCV 命令行：简历及其各模块的增删改查（仅用标准库）。
+"""超级简历 WonderCV 命令行：使用标准库，微信登录展示官方小程序码原图。
 
 凭证：环境变量 WONDERCV_TOKEN，或 ~/.config/wondercv/token（浏览器 Cookie `_t` 的值）。
 输出：默认可读文本，加 --json 输出结构化数据。
 退出码：0 成功；1 接口返回业务错误；2 命令行用法错误；3 输入或本地配置错误；4 网络或服务端故障。
 """
 import argparse
+import base64
+import contextlib
 import datetime
 import hashlib
 import io
 import json
+import math
 import os
+from pathlib import Path
 import re
 import secrets
 import socket
@@ -1773,6 +1777,16 @@ def build_parser():
     ap.add_argument('--json', action='store_true', help='输出 JSON')
     top = ap.add_subparsers(dest='group', required=True)
 
+    auth = top.add_parser('auth', help='微信扫码登录、等待和状态').add_subparsers(dest='cmd', required=True)
+    p = auth.add_parser('login', help='显示官方微信二维码并等待登录')
+    p.add_argument('--start', action='store_true', help='生成后立即返回，由 auth wait 等待（适合 Skill）')
+    p.add_argument('--image-only', action='store_true', help='仅输出小程序码文件链接，交由宿主展示图片')
+    p.add_argument('--replace', action='store_true', help='明确允许成功登录后替换已有凭证；失败保留原凭证')
+    p = auth.add_parser('wait', help='等待扫码确认，短超时返回 waiting，不伪报成功')
+    p.add_argument('--timeout', type=int, default=60)
+    auth.add_parser('status', help='只读验证当前登录状态')
+    auth.add_parser('cancel', help='取消本机待扫码会话，不删除已有凭证或其他设备')
+
     res = top.add_parser('resume', help='简历').add_subparsers(dest='cmd', required=True)
     res.add_parser('list', help='列出简历')
     res.add_parser('show', help='查看可读摘要').add_argument('token')
@@ -2116,6 +2130,335 @@ def _scalar(v):
     return re.sub(r'<[^>]+>', '', str(v)).replace('&nbsp;', ' ').strip() or '-'
 
 
+# ---------- 官方微信扫码登录（终端二维码与可独立等待的 Skill hook） ----------
+
+AUTH_ORIGIN = 'https://api.wondercv.com'
+AUTH_TTL = 57  # 官网二维码请求有效期 60 秒，页面在约 57 秒后停止轮询
+AUTH_INTERVAL = 3
+
+
+def _auth_directory():
+    path = os.path.join(os.path.dirname(TOKEN_FILE), 'login')
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+@contextlib.contextmanager
+def _auth_lock():
+    path = os.path.join(_auth_directory(), 'write.lock')
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as e:
+        raise _input_error('另一个登录操作正在写入，请稍后重试；若进程异常退出，请确认无登录进程后清理 login/write.lock') from e
+    try:
+        yield
+    finally:
+        os.close(fd)
+        os.unlink(path)
+
+
+def _auth_write(path, data, replace=True):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    os.chmod(directory, 0o700)
+    fd, tmp = tempfile.mkstemp(prefix='.login-', dir=directory)
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if replace:
+            os.replace(tmp, path)
+        else:
+            os.link(tmp, path)
+    except OSError as e:
+        raise _input_error('无法安全保存登录文件，已有凭证未被替换') from e
+    finally:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+
+
+def _auth_load():
+    path = os.path.join(_auth_directory(), 'session.json')
+    if not os.path.exists(path):
+        return None
+    try:
+        if os.stat(path).st_mode & 0o077:
+            raise _input_error('扫码会话文件权限过宽，请设置为 600 后重试')
+        with open(path, encoding='utf-8') as f:
+            value = json.load(f)
+        if (not isinstance(value, dict) or not re.fullmatch(r'login_[0-9a-f]{24}', value['scene'])
+                or not isinstance(value['expires_at'], (int, float)) or not math.isfinite(value['expires_at'])
+                or not re.fullmatch(r'qr-[0-9a-f]{24}\.(jpg|png)', value['image'])
+                or value.get('phase') not in ('creating', 'ready') or not isinstance(value['replace'], bool)):
+            raise ValueError('invalid session')
+        return value
+    except (OSError, ValueError, TypeError, KeyError) as e:
+        raise _input_error('扫码会话文件无效，请运行 auth cancel 后重新登录') from e
+
+
+def _auth_clear(value):
+    if value:
+        current = _auth_load()
+        if not current or current['scene'] != value['scene']:
+            return  # 旧等待者不能清理另一个新会话
+        directory = _auth_directory()
+        names = ['qr-' + value['scene'].split('_', 1)[1] + ext for ext in ('.jpg', '.png')]
+        for name in names + ['session.json']:
+            path = os.path.join(directory, name)
+            if os.path.lexists(path):
+                os.unlink(path)
+
+
+def _auth_public(path, params):
+    url = AUTH_ORIGIN + path + '?' + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={'Referer': 'https://www.wondercv.com/',
+                                               'Origin': 'https://www.wondercv.com',
+                                               'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            raw = response.read(256 * 1024 + 1)
+        if len(raw) > 256 * 1024:
+            raise ValueError('oversized response')
+        result = json.loads(raw)
+        if not isinstance(result, dict) or type(result.get('code')) is not int:
+            raise ValueError('invalid response')
+        return result
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise WcvError('官网扫码请求失败；未保存或覆盖凭证，请检查网络后重试', exit_code=EXIT_NETWORK) from e
+
+
+def _auth_token_digest():
+    try:
+        with open(TOKEN_FILE, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise _input_error('无法读取现有凭证，已停止登录以避免覆盖') from e
+
+
+def _auth_artifact(value):
+    path = os.path.join(_auth_directory(), value['image'])
+    return {'status': 'waiting', 'qr_path': path, 'qr_uri': Path(path).absolute().as_uri(),
+            'expires_at': value['expires_at'], 'next': 'auth wait'}
+
+
+def _auth_show(value, image, image_only):
+    term = os.environ.get('TERM', '').lower()
+    program = os.environ.get('TERM_PROGRAM', '').lower()
+    direct = (not image_only and sys.stderr.isatty() and term != 'dumb'
+              and not os.environ.get('TMUX') and not os.environ.get('STY')
+              and not term.startswith(('screen', 'tmux')))
+    if direct and (program in ('iterm.app', 'wezterm') or os.environ.get('ITERM_SESSION_ID')
+                   or os.environ.get('WEZTERM_PANE')):
+        payload = base64.b64encode(image).decode('ascii')
+        print(f'\x1b]1337;File=inline=1;size={len(image)};width=40;preserveAspectRatio=1:{payload}\x07',
+              file=sys.stderr, flush=True)
+        return
+    if direct and (program in ('kitty', 'ghostty', 'warpterminal') or 'kitty' in term or 'ghostty' in term
+                   or os.environ.get('KITTY_WINDOW_ID') or os.environ.get('GHOSTTY_RESOURCES_DIR')):
+        # Kitty 仅接收 PNG/像素数据；保留下载的原图，JPEG 仅在已有 Pillow 时作无损像素转换。
+        if not image.startswith(b'\x89PNG\r\n\x1a\n'):
+            try:
+                from PIL import Image
+                with Image.open(io.BytesIO(image)) as qr:
+                    if qr.width * qr.height > 4_000_000:
+                        raise ValueError('image too large')
+                    buffer = io.BytesIO()
+                    qr.save(buffer, format='PNG')
+                    image = buffer.getvalue()
+            except (ImportError, OSError, ValueError):
+                image = b''
+        if image:
+            payload = base64.b64encode(image).decode('ascii')
+            for offset in range(0, len(payload), 4096):
+                metadata = 'a=T,f=100,q=2,c=40,' if offset == 0 else ''
+                more = int(offset + 4096 < len(payload))
+                sys.stderr.write(f'\x1b_G{metadata}m={more};{payload[offset:offset + 4096]}\x1b\\')
+            print(file=sys.stderr, flush=True)
+            return
+    print('小程序码原图：' + _auth_artifact(value)['qr_uri'], file=sys.stderr)
+    if os.environ.get('SSH_CONNECTION') or os.environ.get('SSH_TTY'):
+        print('这是 SSH 远端文件链接；请先将图片下载到浏览器所在电脑，再打开扫码。', file=sys.stderr)
+
+
+def auth_login(start=False, image_only=False, replace=False):
+    with _auth_lock():
+        old = _auth_load()
+        if old and old['expires_at'] > time.time():
+            raise _input_error('已有待扫码会话，请执行 auth wait 或 auth cancel，不会替换当前二维码')
+        _auth_clear(old)
+        previous = _auth_token_digest()
+        if previous is not None and not replace:
+            raise _input_error('已有登录凭证；更换登录请明确使用 auth login --replace，失败时保留原凭证')
+        nonce = secrets.token_hex(12)
+        scene = 'login_' + nonce
+        value = {'scene': scene, 'expires_at': time.time() + AUTH_TTL, 'phase': 'creating',
+                 'image': 'qr-' + nonce + '.jpg', 'replace': replace, 'previous': previous}
+        # 网络请求前登记会话，使生成二维码期间的 auth cancel 也生效。
+        _auth_write(os.path.join(_auth_directory(), 'session.json'), json.dumps(value).encode())
+    try:
+        response = _auth_public('/auth/v3/wechat_wxa_qrcode',
+                                {'expire_seconds': 60, 'operation_type': 'login', 'scene_str': scene,
+                                 'account_type': 'wechat_miniprogram', 'env_version': 'release'})
+        if response['code'] != 1000 or not isinstance(response.get('data'), dict):
+            raise WcvError('官网未生成小程序码，请稍后重试', exit_code=EXIT_API)
+        try:
+            image = base64.b64decode(response['data']['body'], validate=True)
+        except (ValueError, TypeError, KeyError) as e:
+            raise WcvError('官网小程序码图片无效', exit_code=EXIT_NETWORK) from e
+        ext = 'jpg' if image.startswith(b'\xff\xd8\xff') else 'png' if image.startswith(b'\x89PNG\r\n\x1a\n') else None
+        if not ext or len(image) > 1024 * 1024:
+            raise WcvError('官网二维码图片格式或大小异常，已拒绝', exit_code=EXIT_NETWORK)
+        value.update(image='qr-' + nonce + '.' + ext, phase='ready')
+        with _auth_lock():
+            current = _auth_load()
+            if not current or current['scene'] != scene:
+                raise _input_error('二维码生成已取消，未保存或覆盖凭证')
+            if value['expires_at'] <= time.time():
+                raise _input_error('二维码生成期间已过期，请重新运行 auth login')
+            _auth_write(os.path.join(_auth_directory(), value['image']), image)
+            _auth_write(os.path.join(_auth_directory(), 'session.json'), json.dumps(value).encode())
+    except BaseException:
+        with _auth_lock():
+            _auth_clear(value)
+        raise
+    _auth_show(value, image, image_only)
+    print('请用微信扫码并确认登录；二维码约 60 秒有效。', file=sys.stderr, flush=True)
+    return _auth_artifact(value) if start else auth_wait()
+
+
+def _auth_complete(value, data):
+    token = data.get('jwt')
+    if not isinstance(token, str) or not token or token == 'unlogin' or any(c.isspace() for c in token):
+        raise WcvError('扫码结果缺少有效登录凭证，未保存', exit_code=EXIT_API)
+    if data.get('new_account'):
+        raise _input_error('此微信账号需要在官网完成注册或绑定，请先到官网处理；未保存凭证')
+    directory = os.path.dirname(TOKEN_FILE)
+    device_file = os.path.join(directory, 'device.json')
+    with _auth_lock():
+        current = _auth_load()
+        if not current or current['scene'] != value['scene']:
+            raise _input_error('扫码会话已取消或被替换，未保存凭证')
+        if current['expires_at'] <= time.time():
+            _auth_clear(current)
+            raise _input_error('二维码已过期，请重新运行 auth login')
+        if os.path.exists(device_file):
+            try:
+                with open(device_file, encoding='utf-8') as f:
+                    device = json.load(f)['device_number']
+                if not isinstance(device, str) or not re.fullmatch(r'wondercv-cli-[0-9a-f]{32}', device):
+                    raise ValueError('invalid device')
+            except (OSError, ValueError, TypeError, KeyError) as e:
+                raise _input_error('本机登录设备记录无效，请检查 device.json') from e
+        else:
+            device = 'wondercv-cli-' + secrets.token_hex(16)
+            _auth_write(device_file, json.dumps({'device_number': device}).encode(), replace=False)
+    client = Client(token)
+    try:
+        client.call('POST', '/v3/auth/trusted_devices', body={'device_name': 'WonderCV CLI', 'device_number': device})
+    except WcvError as e:
+        raise WcvError('官网未完成常用设备登记；请在官网登录检查设备名额及账号要求，CLI 不会删除其他设备。未保存凭证。',
+                       code=e.code, exit_code=e.exit_code) from e
+    try:
+        result = client.call('GET', '/v3/cvs', {'page': 1, 'page_size': 1})
+        if not isinstance(result, dict) or not isinstance(result.get('cvs'), list):
+            raise WcvError('invalid verification')
+    except WcvError as e:
+        raise WcvError('新登录凭证未通过只读验证，原凭证保持不变', exit_code=e.exit_code) from e
+    with _auth_lock():
+        current = _auth_load()
+        if not current or current['scene'] != value['scene']:
+            raise _input_error('登录已取消，未保存新凭证')
+        if current['expires_at'] <= time.time():
+            _auth_clear(current)
+            raise _input_error('登录会话已过期，请重新扫码；原凭证未变')
+        if _auth_token_digest() != value['previous']:
+            raise _input_error('等待期间凭证文件已被其他操作修改，未覆盖；请重新登录')
+        _auth_write(TOKEN_FILE, token.encode(), replace=value['previous'] is not None and value['replace'])
+        _auth_clear(value)
+    result = {'status': 'authenticated', 'credential_file': TOKEN_FILE,
+              'environment_override': bool(os.environ.get('WONDERCV_TOKEN', '').strip())}
+    if result['environment_override']:
+        result['hint'] = '凭证已保存到文件；WONDERCV_TOKEN 仍优先，请取消或更新该环境变量后再使用新登录'
+    return result
+
+
+def auth_wait(timeout=60):
+    if timeout <= 0 or timeout > 120:
+        raise _input_error('等待时间应为 1~120 秒')
+    value = _auth_load()
+    if not value:
+        raise _input_error('没有待扫码会话，请先执行 auth login')
+    if value['phase'] != 'ready':
+        raise _input_error('二维码仍在生成，请等待 auth login 完成或执行 auth cancel')
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            current = _auth_load()
+            if not current or current['scene'] != value['scene']:
+                raise _input_error('扫码会话已取消或被替换')
+            if current['expires_at'] <= time.time():
+                with _auth_lock():
+                    _auth_clear(current)
+                raise _input_error('二维码已过期，请重新运行 auth login')
+            response = _auth_public('/cv/v3/auth/wechat_scan_users/wxa_result',
+                                    {'scene_str': value['scene'], 'operation_type': 'login',
+                                     'account_type': 'wechat_miniprogram'})
+            if response['code'] == 1000:
+                data = response.get('data')
+                if not isinstance(data, dict):
+                    raise WcvError('官网扫码结果格式异常', exit_code=EXIT_NETWORK)
+                if data.get('jwt'):
+                    return _auth_complete(value, data)
+            elif response['code'] != 201201:  # 官网在尚未扫码/确认时返回 201201
+                raise WcvError(f"官网扫码登录返回业务码 {response['code']}，请到官网检查登录要求", exit_code=EXIT_API)
+            time.sleep(AUTH_INTERVAL)
+    except KeyboardInterrupt as e:
+        with _auth_lock():
+            _auth_clear(value)
+        raise _input_error('已取消扫码登录，原凭证未变') from e
+    with _auth_lock():
+        current = _auth_load()
+        if not current or current['scene'] != value['scene']:
+            raise _input_error('扫码会话已取消或被替换')
+        if current['expires_at'] <= time.time():
+            _auth_clear(current)
+            raise _input_error('二维码已过期，请重新运行 auth login')
+        return _auth_artifact(current)
+
+
+def auth_cancel():
+    with _auth_lock():
+        directory = _auth_directory()
+        # 即使 session.json 已损坏也可取消；只删除本功能固定命名的文件，不信任 JSON 中的路径。
+        for name in os.listdir(directory):
+            if name == 'session.json' or re.fullmatch(r'qr-[0-9a-f]{24}\.(jpg|png)', name):
+                os.unlink(os.path.join(directory, name))
+    return {'status': 'cancelled'}
+
+
+def run_auth(args):
+    if args.cmd == 'login':
+        return auth_login(start=args.start, image_only=args.image_only, replace=args.replace)
+    if args.cmd == 'wait':
+        return auth_wait(args.timeout)
+    if args.cmd == 'cancel':
+        return auth_cancel()
+    token = load_token()
+    if not token:
+        return {'status': 'not_authenticated'}
+    try:
+        Client(token).call('GET', '/v3/cvs', {'page': 1, 'page_size': 1})
+    except WcvError as e:
+        if e.code == 2001:
+            return {'status': 'not_authenticated'}
+        raise
+    return {'status': 'authenticated', 'source': 'environment' if os.environ.get('WONDERCV_TOKEN') else 'file'}
+
+
 def load_token():
     env = os.environ.get('WONDERCV_TOKEN', '').strip()
     if env:
@@ -2138,7 +2481,7 @@ _install_transport()
 def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
-        result = run(args, Client(load_token()))
+        result = run_auth(args) if args.group == 'auth' else run(args, Client(load_token()))
     except WcvError as e:
         print(e.describe(), file=sys.stderr)
         return e.exit_code

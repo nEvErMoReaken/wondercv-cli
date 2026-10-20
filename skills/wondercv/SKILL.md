@@ -1,8 +1,8 @@
 ---
 name: wondercv
 license: MIT
-description: 使用超级简历 WonderCV 的命令行客户端读取、修改和导出简历。当用户提到超级简历/wondercv、希望 AI 帮忙改该网站里的简历、调整模块/小标题/主题、上传头像/校徽/作品图片、导出 PDF/PNG，或恢复失败的简历操作时使用。通用求职建议或没有使用 WonderCV 的文档写作不触发。
-compatibility: Requires Python 3, network access to WonderCV, and the user's own authenticated WonderCV account. Includes the Python CLI; no pip dependencies.
+description: 使用超级简历 WonderCV 的命令行客户端扫码登录、读取、修改和导出简历。当用户提到超级简历/wondercv、要扫码授权或让 AI 改该网站里的简历、调整模块/小标题/主题、上传头像/校徽/作品图片、导出 PDF/PNG，或恢复失败的简历操作时使用。通用求职建议、其他网站登录或没有使用 WonderCV 的文档写作不触发。
+compatibility: Requires Python 3, network access, and the user's WonderCV account. Includes the CLI. Uses official mini-program images, native terminal image protocols where available, and local file links otherwise.
 ---
 
 # WonderCV
@@ -17,25 +17,33 @@ compatibility: Requires Python 3, network access to WonderCV, and the user's own
 python3 "$WONDERCV_SCRIPT" --help
 ```
 
-凭证来自 `WONDERCV_TOKEN` 或 `~/.config/wondercv/token`。先执行只读查询：
+先只读检查授权：
 
 ```bash
-python3 "$WONDERCV_SCRIPT" --json resume list
+python3 "$WONDERCV_SCRIPT" --json auth status
 ```
 
-若缺少或失效，请用户自行在官网登录，将 Cookie `_t` 存入本机环境变量或权限为 600 的凭证文件。目录权限用 700。让用户在本机隐藏输入或使用其已有的机密管理方式，不让用户把凭证、密码、验证码贴进对话。不要打印凭证文件或将其写入项目、命令行参数、日志、Git。
+未登录时，优先使用官方微信扫码流程，不让用户手动寻找 Cookie：
 
-需要新建凭证文件时，可给用户以下 Bash 操作自行执行：
+1. 先确认用户准备扫码，以及宿主终端是否支持图片展示；不能确认时采用文件链接。运行以下命令取得约 60 秒有效的官方小程序码原图 `qr_path` 和本地文件链接 `qr_uri`。若已有凭证文件，先告知用户并确认替换，之后才加 `--replace`；失败不会覆盖旧凭证。
+   ```bash
+   python3 "$WONDERCV_SCRIPT" --json auth login --start --image-only
+   ```
+2. 宿主支持图片时立即展示 `qr_path` 原图；不支持或能力未知时，把完整的 `qr_uri` 放在用户可见的回复里。文件链接属于脚本所在电脑，SSH 运行时先把图片安全下载到用户所在电脑，再给对应的本机文件链接。工具读到图片不代表用户已经看见；不以浏览器控制台、隐藏工具输出或字符画替代。
+3. 展示后调用等待钩子，而不是等用户再打字说“扫好了”：
+   ```bash
+   python3 "$WONDERCV_SCRIPT" --json auth wait --timeout 60
+   ```
+4. `status=waiting` 仍未登录，不能当成功；过期时重新生成并展示新码，不无限轮询旧码。取消用 `auth cancel`，它不删除已有凭证或官网设备。
+5. 只有 `status=authenticated` 才表示设备登记、只读验证及权限为 600 的凭证保存均完成。若 `environment_override=true`，告知用户旧 `WONDERCV_TOKEN` 仍优先，需要取消或更新环境变量，再运行 `auth status` 核对。
 
-```bash
-install -d -m 700 ~/.config/wondercv
-read -rsp 'WonderCV token: ' WCV_INPUT; printf '\n'
-(umask 077; printf '%s' "$WCV_INPUT" > ~/.config/wondercv/token)
-chmod 600 ~/.config/wondercv/token
-unset WCV_INPUT
-```
+用户直接运行终端命令时，使用 `auth login`：CLI 根据终端环境标识和 TTY 检测，在支持的 iTerm2 / WezTerm / Kitty 协议上显示图片，否则输出 `file://` 链接并等待。tmux / screen、重定向及未知终端回退到链接。Kitty 显示官方 JPEG 需要环境已有 Pillow；缺少时同样回退，不自动安装。使用官网小程序码原图，不走公众号二维码、不重新编码成普通码、不生成字符画。
 
-完成条件：脚本可运行，只读查询成功；否则报告具体阻塞，不继续写入。
+扫码会登记名为 `WonderCV CLI` 的常用设备。设备名额满、需要手机绑定或新账号完善资料时，提示用户去官网处理；不自动踢掉其他设备，不绕过官网要求。二维码及 `login/session.json` 是短期敏感登录材料，不上传到图床、Issue、Git 或公开日志。
+
+仍支持已有凭证：环境变量 `WONDERCV_TOKEN` 优先于 `~/.config/wondercv/token`。用户选择手动方式时，在官网登录后把 `_t` 安全存入本机权限为 600 的文件、目录权限 700；不让用户把凭证、密码、验证码贴进对话，也不打印凭证文件。
+
+完成条件：脚本可运行，`auth status` 只读验证成功；否则报告具体阻塞，不继续编辑简历。
 
 ## 2. 确认目标与修改内容
 
