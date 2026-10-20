@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+*.pem
+*.key
+*.har
+.DS_Store
+
+# Account state, exported resumes, and private validation artifacts.
+.validation/
+artifacts/
+test-fixtures.json
+browser-state.json
+cookies.json
+token
+
+# Local development/acceptance notes contain account identifiers and machine paths.
+/docs/
